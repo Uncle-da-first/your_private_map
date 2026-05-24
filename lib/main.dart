@@ -1,121 +1,259 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
+import 'package:geolocator/geolocator.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const MapNoLogApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class MapNoLogApp extends StatelessWidget {
+  const MapNoLogApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+      title: 'MapNoLog',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0F0F11),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF1D9E75),
+          secondary: Color(0xFF1565C0),
+        ),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MainMixerScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class MainMixerScreen extends StatefulWidget {
+  const MainMixerScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<MainMixerScreen> createState() => _MainMixerScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _MainMixerScreenState extends State<MainMixerScreen> {
+  bool _isMaskingEnabled = false;
+  
+  double _realLat = 0.0;
+  double _realLon = 0.0;
+  double _outputLat = 0.0;
+  double _outputLon = 0.0;
+  
+  double _currentOffsetMeters = 0.0;
+  double _currentBearing = 0.0;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  StreamSubscription<Position>? _gpsStreamSubscription;
+  Timer? _noiseRotationTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _initGPS();
+  }
+
+  @override
+  void dispose() {
+    _gpsStreamSubscription?.cancel();
+    _noiseRotationTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _initGPS() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    
+    if (permission == LocationPermission.deniedForever) return;
+
+    _gpsStreamSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+      ),
+    ).listen((Position position) {
+      setState(() {
+        _realLat = position.latitude;
+        _realLon = position.longitude;
+      });
+      _processCoordinates();
     });
+  }
+
+  void _generateNewNoiseVector() {
+    final random = math.Random();
+    double minDistance = 300.0;
+    double maxDistance = 800.0;
+    
+    _currentOffsetMeters = minDistance + random.nextDouble() * (maxDistance - minDistance);
+    _currentBearing = random.nextDouble() * 2 * math.pi;
+    
+    _processCoordinates();
+  }
+
+  void _processCoordinates() {
+    if (!_isMaskingEnabled || _realLat == 0.0) {
+      setState(() {
+        _outputLat = _realLat;
+        _outputLon = _realLon;
+      });
+      return;
+    }
+
+    const double earthRadius = 6378137.0;
+    double deltaLat = (_currentOffsetMeters * math.cos(_currentBearing)) / earthRadius;
+    double deltaLon = (_currentOffsetMeters * math.sin(_currentBearing)) / (earthRadius * math.cos(_realLat * math.pi / 180));
+
+    setState(() {
+      _outputLat = _realLat + (deltaLat * 180 / math.pi);
+      _outputLon = _realLon + (deltaLon * 180 / math.pi);
+    });
+  }
+
+  void _toggleMasking(bool value) {
+    _isMaskingEnabled = value;
+    
+    if (_isMaskingEnabled) {
+      _generateNewNoiseVector();
+      _noiseRotationTimer = Timer.periodic(const Duration(minutes: 2), (timer) {
+        _generateNewNoiseVector();
+      });
+    } else {
+      _noiseRotationTimer?.cancel();
+      _currentOffsetMeters = 0.0;
+      _processCoordinates();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('📍 MapNoLog Engine', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        backgroundColor: const Color(0xFF16161A),
+        elevation: 0,
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: Padding(
+        padding: const EdgeInsets.all(20.0),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: _isMaskingEnabled ? const Color(0xFF0A2F24) : const Color(0xFF261818),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _isMaskingEnabled ? const Color(0xFF1D9E75) : const Color(0xFFD32F2F),
+                  width: 1.5,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _isMaskingEnabled ? Icons.shield_rounded : Icons.gpp_bad_rounded,
+                    color: _isMaskingEnabled ? const Color(0xFF1D9E75) : const Color(0xFFD32F2F),
+                    size: 40,
+                  ),
+                  const SizedBox(width: 15),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _isMaskingEnabled ? "PRIVACY ACTIVE" : "TRACKING RISK",
+                          style: TextStyle(
+                            fontSize: 18, 
+                            fontWeight: FontWeight.bold, 
+                            color: _isMaskingEnabled ? const Color(0xFF1D9E75) : const Color(0xFFD32F2F)
+                          ),
+                        ),
+                        Text(
+                          _isMaskingEnabled 
+                              ? "Vector updates every 2 min. Streaming fuzzed data." 
+                              : "GPS sensors are streaming raw telemetry.",
+                          style: const TextStyle(fontSize: 13, color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 40),
+
+            _buildCoordinateTile(
+              "Real GPS (From Satellites)", 
+              _realLat, 
+              _realLon, 
+              _realLat == 0.0 ? Colors.orange : Colors.grey
+            ),
+            const SizedBox(height: 15),
+            _buildCoordinateTile(
+              "Fuzzed Stream Output", 
+              _outputLat, 
+              _outputLon, 
+              _isMaskingEnabled ? const Color(0xFF1D9E75) : Colors.grey
+            ),
+            
+            if (_isMaskingEnabled) ...[
+              const SizedBox(height: 10),
+              Text(
+                "Current Vector: ~${_currentOffsetMeters.toStringAsFixed(1)}m at ${(_currentBearing * 180 / math.pi).toStringAsFixed(0)}°",
+                style: const TextStyle(color: Color(0xFF1D9E75), fontWeight: FontWeight.w500),
+              ),
+            ],
+
+            const SizedBox(height: 50),
+
+            Transform.scale(
+              scale: 1.5,
+              child: Switch(
+                value: _isMaskingEnabled,
+                activeColor: const Color(0xFF1D9E75),
+                onChanged: _toggleMasking,
+              ),
+            ),
+            const SizedBox(height: 15),
+            const Text(
+              "Toggle Dynamic Privacy Layer",
+              style: TextStyle(fontSize: 16, color: Colors.white54),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+    );
+  }
+
+  Widget _buildCoordinateTile(String title, double lat, double lon, Color color) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: const Color(0xFF16161A),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          Text(
+            lat == 0.0 ? "Waiting for GPS fix..." : "Lat: ${lat.toStringAsFixed(6)} | Lon: ${lon.toStringAsFixed(6)}",
+            style: const TextStyle(fontSize: 15, fontFamily: 'monospace', fontWeight: FontWeight.w500),
+          ),
+        ],
       ),
     );
   }
